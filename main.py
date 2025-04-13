@@ -3,11 +3,11 @@ import os
 import time
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot
+import telepot
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+bot = telepot.Bot(TELEGRAM_BOT_TOKEN)
 
 def check_price():
     product_url = "https://www.amazon.fr/dp/B093BZCZR4"
@@ -44,7 +44,7 @@ def check_price():
                 f"Réduction : -{reduction}%\n\n"
                 f"Lien : {product_url}"
             )
-            bot.send_message(chat_id=TELEGRAM_USER_ID, text=message)
+            bot.sendMessage(TELEGRAM_USER_ID, message)
         else:
             print(f"Aucune promo >70% trouvée : {title} - {reduction}%")
 
