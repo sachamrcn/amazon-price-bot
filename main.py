@@ -1,58 +1,100 @@
 
 import os
-import time
 import requests
 from bs4 import BeautifulSoup
 import telepot
+from telepot.loop import MessageLoop
+from telepot.namedtuple import InlineKeyboardMarkup, InlineKeyboardButton
+import time
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
 bot = telepot.Bot(TELEGRAM_BOT_TOKEN)
 
-def check_price():
-    product_url = "https://www.amazon.fr/dp/B093BZCZR4"
+BASE_URL = "https://www.amazon.fr"
+
+def get_categories():
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         "Accept-Language": "fr-FR,fr;q=0.9"
     }
+    response = requests.get(BASE_URL, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
+    nav = soup.select("div.nav-template.nav-flyout-content a.nav_a")
+    
+    categories = []
+    for link in nav:
+        name = link.get_text(strip=True)
+        href = link.get("href")
+        if name and href and "/s?" in href:
+            full_url = BASE_URL + href
+            categories.append((name, full_url))
+        if len(categories) >= 10:
+            break
+    return categories
 
-    try:
-        response = requests.get(product_url, headers=headers)
-        soup = BeautifulSoup(response.text, "html.parser")
+def scan_category(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "fr-FR,fr;q=0.9"
+    }
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
 
-        title = soup.find(id="productTitle").get_text(strip=True) if soup.find(id="productTitle") else "Titre non trouvé"
-        price_block = soup.find("span", class_="a-price-whole")
-        price_fraction = soup.find("span", class_="a-price-fraction")
-        price_current = f"{price_block.get_text(strip=True)}.{price_fraction.get_text(strip=True)}" if price_block and price_fraction else None
-        price_old_span = soup.find("span", class_="a-text-strike")
-        price_old_text = price_old_span.get_text(strip=True).replace("€", "").replace(",", ".") if price_old_span else None
+    results = []
+    products = soup.find_all("div", {"data-component-type": "s-search-result"})
 
-        price_current_float = float(price_current.replace("€", "").replace(",", ".")) if price_current else None
-        price_old_float = float(price_old_text) if price_old_text else None
+    for product in products:
+        try:
+            title = product.h2.get_text(strip=True)
+            url_product = BASE_URL + product.h2.a["href"]
 
-        if price_current_float and price_old_float and price_old_float > price_current_float:
-            reduction = round((price_old_float - price_current_float) / price_old_float * 100)
-        else:
-            reduction = 0
+            price_whole = product.select_one("span.a-price-whole")
+            price_fraction = product.select_one("span.a-price-fraction")
+            price_old = product.select_one("span.a-text-price span.a-offscreen")
 
-        if reduction >= 70:
-            message = (
-                "[ALERTE AMAZON -70%+]\n\n"
-                f"Nom : {title}\n"
-                f"Ancien prix : {price_old_float} €\n"
-                f"Prix actuel : {price_current_float} €\n"
-                f"Réduction : -{reduction}%\n\n"
-                f"Lien : {product_url}"
-            )
-            bot.sendMessage(TELEGRAM_USER_ID, message)
-        else:
-            print(f"Aucune promo >70% trouvée : {title} - {reduction}%")
+            if price_whole and price_fraction and price_old:
+                price_current = float((price_whole.get_text() + "." + price_fraction.get_text()).replace(",", ".").replace("€", ""))
+                price_old_value = float(price_old.get_text().replace(",", ".").replace("€", "").strip())
 
-    except Exception as e:
-        print(f"Erreur dans le scraping : {e}")
+                if price_old_value > price_current:
+                    reduction = round((price_old_value - price_current) / price_old_value * 100)
 
-# Boucle infinie toutes les 10 minutes
-if __name__ == "__main__":
-    while True:
-        check_price()
-        time.sleep(600)
+                    if reduction >= 50:
+                        results.append(f"**{title}**\nAncien prix: {price_old_value} €\nPrix actuel: {price_current} €\nRéduction: -{reduction}%\n{url_product}")
+
+        except Exception as e:
+            print("Erreur sur un produit:", e)
+
+    return results
+
+def handle(msg):
+    content_type, chat_type, chat_id = telepot.glance(msg)
+    if chat_id != TELEGRAM_USER_ID:
+        return
+
+    if content_type == "text":
+        if msg["text"].lower() == "/categories":
+            cat_list = get_categories()
+            if not cat_list:
+                bot.sendMessage(chat_id, "Impossible de récupérer les catégories.")
+                return
+
+            buttons = [[InlineKeyboardButton(text=name, callback_data=url)] for name, url in cat_list]
+            markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+            bot.sendMessage(chat_id, "Choisis une catégorie :", reply_markup=markup)
+
+def on_callback(msg):
+    query_id, from_id, query_data = telepot.glance(msg, flavor="callback_query")
+    bot.answerCallbackQuery(query_id, text="Scan en cours...")
+    promos = scan_category(query_data)
+    if promos:
+        for promo in promos:
+            bot.sendMessage(from_id, promo, parse_mode="Markdown")
+    else:
+        bot.sendMessage(from_id, "Aucune promo à -50% ou plus trouvée dans cette catégorie.")
+
+MessageLoop(bot, {'chat': handle, 'callback_query': on_callback}).run_as_thread()
+
+while True:
+    time.sleep(10)
